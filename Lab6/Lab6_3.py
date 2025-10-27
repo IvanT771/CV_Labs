@@ -7,12 +7,12 @@ from matplotlib import pyplot as plt
 # ===============================================================
 
 # --- Загрузка изображения и шаблона ---
-img = cv.imread('messi5.jpg', cv.IMREAD_GRAYSCALE)
+img = cv.imread('Lab6/car.jpg', cv.IMREAD_GRAYSCALE)
 assert img is not None, "file could not be read, check with os.path.exists()"
 
 img2 = img.copy()  # создаём копию, чтобы не изменять исходник
 
-template = cv.imread('template.jpg', cv.IMREAD_GRAYSCALE)
+template = cv.imread('Lab6/car_template.jpg', cv.IMREAD_GRAYSCALE)
 assert template is not None, "template file could not be read, check with os.path.exists()"
 
 w, h = template.shape[::-1]  # ширина и высота шаблона
@@ -64,12 +64,12 @@ for meth in methods:
 # ===============================================================
 
 # --- Загрузка цветного изображения и шаблона ---
-img_rgb = cv.imread('mario.png')
+img_rgb = cv.imread('Lab6/multi.png')
 assert img_rgb is not None, "file could not be read, check with os.path.exists()"
 
 img_gray = cv.cvtColor(img_rgb, cv.COLOR_BGR2GRAY)
 
-template = cv.imread('mario_coin.png', 0)
+template = cv.imread('Lab6/multi_health.png', 0)
 assert template is not None, "template file could not be read, check with os.path.exists()"
 
 w, h = template.shape[::-1]

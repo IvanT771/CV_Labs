@@ -7,7 +7,7 @@ from matplotlib import pyplot as plt
 # ================================================================
 
 # Загружаем изображение в оттенках серого
-img = cv.imread('dave.jpg', cv.IMREAD_GRAYSCALE)
+img = cv.imread('Lab3/sudoku.jpg', cv.IMREAD_GRAYSCALE)
 assert img is not None, "file could not be read, check with os.path.exists()"
 
 # --- Laplacian ---
@@ -42,7 +42,7 @@ plt.show()
 # ================================================================
 
 # Загружаем второе изображение
-img2 = cv.imread('box.png', cv.IMREAD_GRAYSCALE)
+img2 = cv.imread('Lab6/figure.jpg', cv.IMREAD_GRAYSCALE)
 assert img2 is not None, "file could not be read, check with os.path.exists()"
 
 # --- Sobel с типом CV_8U ---

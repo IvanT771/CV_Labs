@@ -3,7 +3,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 
 # === Загрузка изображения в оттенках серого ===
-img = cv.imread('messi5.jpg', cv.IMREAD_GRAYSCALE)
+img = cv.imread('Lab6/car.jpg', cv.IMREAD_GRAYSCALE)
 assert img is not None, "file could not be read, check with os.path.exists()"
 
 # === 1. Применение размытия ===
