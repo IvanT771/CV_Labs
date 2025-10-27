@@ -49,5 +49,6 @@ cv.putText(img, text, (textX, textY), font, 3, textColor, 3, cv.LINE_AA)
 
 cv.imwrite("Lab2/open-cv-logo.jpg",img)
 
-cv.imshow("Display windows", img)
+cv.imshow("Logo", img)
 cv.waitKey(0)
+cv.destroyAllWindows()
