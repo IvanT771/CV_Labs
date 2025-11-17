@@ -4,6 +4,16 @@ from typing import Dict, List, Tuple
 
 import cv2 as cv
 import numpy as np
+import re
+
+try:
+    import pytesseract
+
+    HAS_TESSERACT = True
+    # Путь к tesseract.exe (как в лабораторной с OCR).
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+except Exception:
+    HAS_TESSERACT = False
 
 
 # === Конфигурация ===
@@ -247,10 +257,10 @@ def crop_plate(image: np.ndarray, contour: np.ndarray) -> np.ndarray:
     if plate.shape[0] > plate.shape[1]:
         plate = cv.rotate(plate, cv.ROTATE_90_CLOCKWISE)
 
-    # Увеличиваем вырезанный номер до комфортного размера,
-    # чтобы цифры были крупными и лучше поддавались бинаризации/сопоставлению.
+    # Увеличиваем вырезанный номер до более крупного размера,
+    # чтобы цифры были максимально читаемыми.
     h_p, w_p = plate.shape[:2]
-    target_height = 120  # более высокое целевое разрешение по высоте
+    target_height = 500  # ещё более высокое целевое разрешение по высоте
     if h_p < target_height:
         scale = target_height / float(h_p)
         new_w = int(w_p * scale)
@@ -266,7 +276,7 @@ CHAR_SPLIT_FRACTIONS = [
     4.0 / 8.0,
     5.1 / 8.0,
     6.0 / 8.0,
-    7.2 / 8.0,
+    7.0 / 8.0,
     1.0,
 ]
 
@@ -285,12 +295,16 @@ def segment_characters(
     # Перевод в оттенки серого
     gray_orig = cv.cvtColor(plate_img, cv.COLOR_BGR2GRAY)
 
-    # Очистка от шума перед нарезкой: более сильная медианная фильтрация
-    gray_denoised = cv.medianBlur(gray_orig, 5)
+    # Более агрессивная очистка от шума:
+    # сначала медианная фильтрация для точечного шума,
+    # затем нелокальное сглаживание fastNlMeansDenoising.
+    gray_med = cv.medianBlur(gray_orig, 5)
+    gray_denoised = cv.fastNlMeansDenoising(
+        gray_med, None, h=25, templateWindowSize=7, searchWindowSize=21
+    )
 
-    # Усиление контраста: CLAHE работает лучше на локальных участках,
-    # чем глобальное equalizeHist, что делает цифры более чёткими.
-    clahe = cv.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    # Усиление контраста: CLAHE на уже очищенном изображении
+    clahe = cv.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
     gray = clahe.apply(gray_denoised)
 
     h, w = gray.shape
@@ -402,13 +416,14 @@ def match_symbol(
     return best_char, best_score
 
 
-def recognize_plate(
+def recognize_plate_templates(
     plate_img: np.ndarray,
     digits_templates: Dict[str, np.ndarray],
     letters_templates: Dict[str, np.ndarray],
 ) -> Tuple[str, List[Tuple[int, int, int, int]]]:
     """
-    Распознаёт номерной знак по вырезанному изображению номера.
+    Распознаёт номерной знак по вырезанному изображению номера,
+    используя сопоставление с шаблонами (matchTemplate).
 
     Возвращает строку распознанного номера и список координат символов.
     """
@@ -431,6 +446,90 @@ def recognize_plate(
         )
     else:
         plate_text = "".join(result_chars)
+
+    return plate_text, regions
+
+
+def ocr_with_tesseract(plate_img: np.ndarray) -> str | None:
+    """
+    Распознавание номерного знака с помощью Tesseract OCR.
+
+    Выполняет дополнительную обработку:
+      - перевод в оттенки серого,
+      - медианная фильтрация,
+      - CLAHE,
+      - бинаризация,
+      - OCR с ограниченным набором символов.
+    """
+    if not HAS_TESSERACT:
+        return None
+
+    gray = cv.cvtColor(plate_img, cv.COLOR_BGR2GRAY)
+    gray = cv.medianBlur(gray, 5)
+
+    clahe = cv.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+
+    # Бинаризация (символы тёмные на светлом фоне)
+    _, bw = cv.threshold(gray, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
+
+    # Конфигурация Tesseract: одна строка текста, только латинские буквы и цифры,
+    # которые используются в российских номерах.
+    whitelist = "ABCEHKMOPTXY0123456789"
+    config = (
+        f"-l eng --oem 3 --psm 7 -c tessedit_char_whitelist={whitelist}"
+    )
+
+    try:
+        text_raw = pytesseract.image_to_string(bw, config=config)
+    except Exception:
+        return None
+
+    # Очищаем от лишних символов и пробелов
+    text = re.sub(r"[^A-Z0-9]", "", text_raw.upper())
+    if not text:
+        return None
+
+    # Пытаемся привести к формату буква-3 цифры-2 буквы-2/3 цифры
+    # Пример: A123BC77
+    pattern = re.compile(r"^[ABCEHKMOPTXY][0-9]{3}[ABCEHKMOPTXY]{2}[0-9]{2,3}$")
+    if pattern.match(text):
+        # Добавим пробел перед регионом, чтобы было читаемо
+        base = text[:6]
+        region = text[6:]
+        return f"{base} {region}"
+
+    return text
+
+
+def recognize_plate(
+    plate_img: np.ndarray,
+    digits_templates: Dict[str, np.ndarray],
+    letters_templates: Dict[str, np.ndarray],
+) -> Tuple[str, List[Tuple[int, int, int, int]]]:
+    """
+    Комбинированное распознавание: Tesseract + шаблоны.
+
+    Сначала пытаемся распознать номер с помощью Tesseract.
+    Если OCR дал осмысленный результат, используем его как основной,
+    иначе используем вариант по шаблонам.
+    """
+    # Вариант по шаблонам (как в методичке)
+    plate_text_templates, regions = recognize_plate_templates(
+        plate_img, digits_templates, letters_templates
+    )
+
+    plate_text = plate_text_templates
+
+    # Попробуем OCR, если Tesseract доступен
+    if HAS_TESSERACT:
+        ocr_text = ocr_with_tesseract(plate_img)
+        if ocr_text:
+            print(
+                f"OCR (Tesseract): {ocr_text} | "
+                f"templates: {plate_text_templates}"
+            )
+            plate_text = ocr_text
 
     return plate_text, regions
 
