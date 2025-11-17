@@ -2,7 +2,6 @@ import cv2 as cv
 import numpy as np
 
 # === ЛР9_1. Детектор углов Харриса
-# === По примеру из:
 # === https://docs.opencv.org/3.4/dc/d0d/tutorial_py_features_harris.html
 
 # 1. Загружаем изображение с большим количеством пересечений (углов)
