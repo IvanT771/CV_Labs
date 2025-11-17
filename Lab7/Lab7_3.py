@@ -2,6 +2,8 @@ import cv2 as cv
 import pytesseract
 import numpy as np
 
+#https://geekyants.com/blog/exploring-optical-character-recognition-ocr-an-experiment-with-opencv-and-pytesseract
+
 # === Путь к Tesseract ===
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 

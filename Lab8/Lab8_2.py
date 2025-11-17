@@ -1,6 +1,8 @@
 import cv2 as cv
 from matplotlib import pyplot as plt
 
+#https://docs.opencv.org/3.4/d5/daf/tutorial_py_histogram_equalization.html
+
 # 1. Загружаем изображение
 img = cv.imread('Lab8/t.jpg', cv.IMREAD_GRAYSCALE)
 assert img is not None, "Файл Lab4/noisy2.png не найден."

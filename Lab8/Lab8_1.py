@@ -2,6 +2,8 @@ import cv2 as cv
 import numpy as np
 from matplotlib import pyplot as plt
 
+#https://docs.opencv.org/3.4/d1/db7/tutorial_py_histogram_begins.html
+
 # 1. Загружаем изображение в оттенках серого
 img = cv.imread('Lab3/img2.jpg', cv.IMREAD_GRAYSCALE)
 assert img is not None, "Файл Lab3/img2.jpg не найден."

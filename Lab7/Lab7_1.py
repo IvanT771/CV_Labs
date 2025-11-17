@@ -2,6 +2,8 @@ import cv2 as cv
 import numpy as np
 from matplotlib import pyplot as plt
 
+#https://docs.opencv.org/3.4/d9/d61/tutorial_py_morphological_ops.html
+
 # === Загрузка изображения ===
 img = cv.imread('Lab7/1.jpg', cv.IMREAD_GRAYSCALE)
 assert img is not None, "Файл не найден."

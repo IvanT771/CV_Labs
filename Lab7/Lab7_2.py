@@ -1,6 +1,8 @@
 import cv2 as cv
 import numpy as np
 
+#https://docs.opencv.org/4.x/dd/dd7/tutorial_morph_lines_detection.html
+
 # === Загрузка изображения ===
 src = cv.imread('Lab3/sudoku.jpg', cv.IMREAD_GRAYSCALE)
 assert src is not None, "Файл не найден."
