@@ -4,7 +4,7 @@ from matplotlib import pyplot as plt
 
 # ---------- Простая пороговая обработка ----------
 # Чтение изображения в градациях серого
-img = cv.imread('Lab4/gradient.png', 0)
+img = cv.imread('Lab4/wood.jpg', 0)
 assert img is not None, "Файл не найден."
 
 # Применение разных типов пороговой фильтрации
