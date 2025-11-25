@@ -69,9 +69,10 @@ plt.show()
 # ---------- 5. Двусторонняя фильтрация ----------
 # d=9 — диаметр области фильтрации
 # sigmaColor=75, sigmaSpace=75 — степень размытия по цвету и пространству
-blur = cv.bilateralFilter(img, 9, 75, 75)
+img2 = cv.imread('Lab4/wood.jpg')
+blur = cv.bilateralFilter(img2, 9, 75, 75)
 
-plt.subplot(121), plt.imshow(img), plt.title('Original')
+plt.subplot(121), plt.imshow(img2), plt.title('Original')
 plt.xticks([]), plt.yticks([])
 plt.subplot(122), plt.imshow(blur), plt.title('Bilateral Filter')
 plt.xticks([]), plt.yticks([])
