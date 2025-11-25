@@ -1,7 +1,7 @@
 import cv2 as cv
 import numpy as np
 
-# === ЛР12_2. Обнаружение прямых линий (Хафф)
+# === ЛР12_2. Обнаружение прямых линий 
 # === По примеру из:
 # === https://docs.opencv.org/3.4/d6/d10/tutorial_py_houghlines.html
 
@@ -14,7 +14,7 @@ gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
 # 2. Находим границы (Canny)
 edges = cv.Canny(gray, 50, 150, apertureSize=3)
 
-cv.imshow('Edges', edges)
+#cv.imshow('Edges', edges)
 
 # 3. Классический Хафф (HoughLines)
 lines = cv.HoughLines(edges, rho=1, theta=np.pi / 180, threshold=200)
@@ -32,7 +32,7 @@ if lines is not None:
         y2 = int(y0 - 1000 * (a))
         cv.line(img_hough, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
-cv.imshow('HoughLines', img_hough)
+#cv.imshow('HoughLines', img_hough)
 
 # 4. Пробабилистический Хафф (HoughLinesP)
 lines_p = cv.HoughLinesP(edges, 1, np.pi / 180, threshold=100, minLineLength=50, maxLineGap=10)
