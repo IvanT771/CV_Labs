@@ -1,628 +1,356 @@
 import os
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
-import cv2 as cv
+import cv2
 import numpy as np
-import re
 
-try:
-    import pytesseract
+# ============================================================
+# Пути под твой проект
+# ============================================================
 
-    HAS_TESSERACT = True
-    # Путь к tesseract.exe (как в лабораторной с OCR).
-    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-except Exception:
-    HAS_TESSERACT = False
+IMAGES_DIR = Path("PR/Images")     # исходные фото машин
+TEMPLATES_DIR = Path("PR/gosznak") # шаблоны ГОСТ (буквы+цифры)
+RESULTS_DIR = Path("PR/Results")   # сюда пишем итоговые картинки
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# ============================================================
+# Формат номера: буква, 3 цифры, 2 буквы, 2 цифры региона
+# Всего 8 символов
+# ============================================================
 
-# === Конфигурация ===
-
-# Ожидаемый формат номера: буква, 3 цифры, 2 буквы, 2 цифры региона
 CHAR_PATTERN: List[str] = [
-    "letter",
-    "digit",
-    "digit",
-    "digit",
-    "letter",
-    "letter",
-    "digit",
-    "digit",
+    "letter", "digit", "digit", "digit",
+    "letter", "letter",
+    "digit", "digit",
 ]
 
-IMAGES_DIR = Path("PR/Images")
-TEMPLATES_DIR = Path("PR/gosznak")
-RESULTS_DIR = Path("PR/Results")
-RESULTS_DIR.mkdir(exist_ok=True)
-
-
-def _order_box_points(pts: np.ndarray) -> np.ndarray:
-    """
-    Упорядочиваем 4 точки прямоугольника в виде:
-    top-left, top-right, bottom-right, bottom-left.
-    """
-    rect = np.zeros((4, 2), dtype=np.float32)
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]  # top-left
-    rect[2] = pts[np.argmax(s)]  # bottom-right
-
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]  # top-right
-    rect[3] = pts[np.argmax(diff)]  # bottom-left
-
-    return rect
-
-
-def load_templates(
-    templates_dir: Path,
-) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
-    """
-    Загружаем шаблоны символов ГОСТ.
-
-    Возвращает два словаря:
-      - digits: { '0': img, ..., '9': img }
-      - letters: { 'A': img, 'B': img, ... }
-
-    Все изображения переводятся в оттенки серого и бинаризуются.
-    """
-    digits: Dict[str, np.ndarray] = {}
-    letters: Dict[str, np.ndarray] = {}
-
-    for path in sorted(templates_dir.glob("*.png")):
-        name = path.stem  # '0', 'A', 'B', ...
-        img = cv.imread(str(path), cv.IMREAD_GRAYSCALE)
-
-        if img is None:
-            continue
-
-        # Бинаризация шаблона (Otsu)
-        _, bin_img = cv.threshold(img, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
-
-        # Делаем так, чтобы символы были белыми на чёрном фоне
-        if cv.countNonZero(bin_img) > bin_img.size / 2:
-            bin_img = cv.bitwise_not(bin_img)
-
-        # У цифры '8' исходный шаблон получается инверсным,
-        # поэтому дополнительно инвертируем её вручную.
-        if name == "8":
-            bin_img = cv.bitwise_not(bin_img)
-
-        if name.isdigit():
-            digits[name] = bin_img
-        else:
-            letters[name.upper()] = bin_img
-
-    # Визуализируем все обработанные шаблоны в одном окне
-    try:
-        import matplotlib.pyplot as plt
-
-        images: List[np.ndarray] = []
-        labels: List[str] = []
-
-        for ch, img in sorted(digits.items()):
-            images.append(img)
-            labels.append(ch)
-        for ch, img in sorted(letters.items()):
-            images.append(img)
-            labels.append(ch)
-
-        if images:
-            cols = 8
-            rows = int(np.ceil(len(images) / cols))
-            plt.figure("Шаблоны ГОСТ после обработки", figsize=(2 * cols, 2 * rows))
-            for i, (im, lab) in enumerate(zip(images, labels), start=1):
-                ax = plt.subplot(rows, cols, i)
-                ax.imshow(im, cmap="gray")
-                ax.set_title(lab)
-                ax.axis("off")
-            plt.tight_layout()
-            plt.show()
-    except Exception:
-        # Если matplotlib не установлен или возникла ошибка при отображении,
-        # просто пропускаем визуализацию шаблонов.
-        pass
-
-    return digits, letters
-
-
-def global_threshold_from_first_image(imagePath: Path) -> int:
-    """
-    Вычисляем общий порог для бинаризации по первой картинке с помощью метода Отсу.
-    Этот порог затем применяем ко всем изображениям (требование 1 этапа).
-    """
-    first = imagePath
-    img = cv.imread(str(first))
-    if img is None:
-        raise FileNotFoundError(f"Не удалось загрузить {first}")
-
-    gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
-    gray_blur = cv.GaussianBlur(gray, (5, 5), 0)
-    # THRESH_BINARY + OTSU вернёт значение порога в ret
-    ret, _ = cv.threshold(gray_blur, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
-    print(f"Глобальный порог (Отсу) по {first.name}: {ret}")
-    return int(ret)
-
-
-def auto_threshold(image: np.ndarray) -> np.ndarray:
-    """
-    Бинаризация цветного изображения с автоматическим порогом (метод Отсу).
-    """
-    gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
-    blurred = cv.GaussianBlur(gray, (5, 5), 0)
-    _, binary = cv.threshold(
-        blurred, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU
-    )
-    return binary
-
-
-def binarize_image(gray: np.ndarray, thr: int) -> np.ndarray:
-    """
-    Бинаризация изображения с заданным порогом.
-    При необходимости инвертируем, чтобы номер был белым на чёрном.
-    """
-    _, bw = cv.threshold(gray, thr, 255, cv.THRESH_BINARY)
-
-    # Если фон оказался белым (белых пикселей слишком много) — инвертируем
-    if cv.countNonZero(bw) > bw.size / 2:
-        bw = cv.bitwise_not(bw)
-
-    return bw
-
-
-def find_plate_contour(bw: np.ndarray) -> np.ndarray:
-    """
-    По бинарному изображению ищем контур номерного знака.
-
-    Фильтрация по площади и соотношению сторон.
-    В итоге выбираем один лучший контур.
-    """
-    contours, _ = cv.findContours(bw, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-
-    # Пороговые значения площади и соотношения сторон
-    # взяты по аналогии с заготовкой из практической работы.
-    min_area = 1000
-    max_area = 10000
-    min_aspect, max_aspect = 2.0, 5.0
-
-    best_cnt = None
-    best_area = 0
-
-    for cnt in contours:
-        x, y, cw, ch = cv.boundingRect(cnt)
-        if cw == 0 or ch == 0:
-            continue
-
-        area = cw * ch
-        if area < min_area or area > max_area:
-            continue
-
-        aspect = cw / float(ch)
-        if not (min_aspect <= aspect <= max_aspect):
-            continue
-
-        # Выбираем контур с максимальной площадью среди подходящих
-        if area > best_area:
-            best_area = area
-            best_cnt = cnt
-
-    if best_cnt is None:
-        raise RuntimeError("Не удалось найти контур номерного знака.")
-
-    return best_cnt
-
-
-def crop_plate(image: np.ndarray, contour: np.ndarray) -> np.ndarray:
-    """
-    Вырезаем номерной знак по минимальному описанному прямоугольнику (minAreaRect)
-    с помощью перспективного преобразования.
-
-    Здесь мы не делаем «ручного» поворота, а используем четыре вершины
-    прямоугольника и классический алгоритм выпрямления: точки упорядочиваются
-    как TL, TR, BR, BL, далее строится матрица cv.getPerspectiveTransform.
-    """
-    rect = cv.minAreaRect(contour)
-    box = cv.boxPoints(rect)  # (4, 2)
-    box = np.array(box, dtype=np.float32)
-
-    # Упорядочиваем вершины прямоугольника: TL, TR, BR, BL
-    ordered = _order_box_points(box)
-    (tl, tr, br, bl) = ordered
-
-    # Оцениваем размеры выпрямлённого прямоугольника
-    widthA = np.linalg.norm(br - bl)
-    widthB = np.linalg.norm(tr - tl)
-    maxWidth = int(max(widthA, widthB))
-
-    heightA = np.linalg.norm(tr - br)
-    heightB = np.linalg.norm(tl - bl)
-    maxHeight = int(max(heightA, heightB))
-
-    if maxWidth <= 0 or maxHeight <= 0:
-        raise RuntimeError("Размеры вырезанного номерного знака равны нулю.")
-
-    dst = np.array(
-        [
-            [0, 0],
-            [maxWidth - 1, 0],
-            [maxWidth - 1, maxHeight - 1],
-            [0, maxHeight - 1],
-        ],
-        dtype=np.float32,
-    )
-
-    M = cv.getPerspectiveTransform(ordered, dst)
-    plate = cv.warpPerspective(image, M, (maxWidth, maxHeight))
-
-    # Нормализуем ориентацию: ширина должна быть больше высоты
-    if plate.shape[0] > plate.shape[1]:
-        plate = cv.rotate(plate, cv.ROTATE_90_CLOCKWISE)
-
-    # Увеличиваем вырезанный номер до более крупного размера,
-    # чтобы цифры были максимально читаемыми.
-    h_p, w_p = plate.shape[:2]
-    target_height = 500  # ещё более высокое целевое разрешение по высоте
-    if h_p < target_height:
-        scale = target_height / float(h_p)
-        new_w = int(w_p * scale)
-        plate = cv.resize(plate, (new_w, target_height), interpolation=cv.INTER_CUBIC)
-
-    return plate
-
-CHAR_SPLIT_FRACTIONS = [
-    0.05,
-    1.4 / 8.0,
-    2.4 / 8.0,
-    3.1 / 8.0,
-    4.0 / 8.0,
-    5.1 / 8.0,
-    6.0 / 8.0,
-    7.0 / 8.0,
-    1.0,
+# Координаты сегментации символов внутри ROI номера
+# Эти координаты взяты из кода репозитория cv1 (split_number_by_image),
+# рассчитаны под типичный ROI номерного знака.
+CHAR_BOXES: List[Tuple[int, int, int, int]] = [
+    (7, 4, 15, 20),
+    (20, 0, 18, 30),
+    (35, 3, 15, 21),
+    (47, 0, 15, 30),
+    (62, 5, 18, 19),
+    (75, 5, 15, 19),
+    (90, 0, 15, 20),
+    (100, 0, 15, 20),
 ]
 
-def segment_characters(
-    plate_img: np.ndarray, expected_chars: int = 8
-) -> Tuple[List[np.ndarray], List[Tuple[int, int, int, int]]]:
+
+# ============================================================
+# Коррекция яркости (из cv1)
+# ============================================================
+
+def adjust_brightness(image: np.ndarray) -> np.ndarray:
     """
-    Нарезка номерного знака на отдельные символы.
-
-    Здесь мы предварительно усиливаем читаемость символов:
-      - переводим номер в оттенки серого,
-      - подавляем шум медианной фильтрацией,
-      - усиливаем контраст equalizeHist,
-      - после этого режем и бинаризуем символы.
+    Выравнивание яркости в YUV, как в репозитории cv1.
     """
-    # Перевод в оттенки серого
-    gray_orig = cv.cvtColor(plate_img, cv.COLOR_BGR2GRAY)
+    yuv = cv2.cvtColor(image, cv2.COLOR_BGR2YUV)
+    yuv[:, :, 0] = cv2.equalizeHist(yuv[:, :, 0])
+    return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
-    # Более агрессивная очистка от шума:
-    # сначала медианная фильтрация для точечного шума,
-    # затем нелокальное сглаживание fastNlMeansDenoising.
-    gray_med = cv.medianBlur(gray_orig, 5)
-    gray_denoised = cv.fastNlMeansDenoising(
-        gray_med, None, h=25, templateWindowSize=7, searchWindowSize=21
-    )
 
-    # Усиление контраста: CLAHE на уже очищенном изображении
-    clahe = cv.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
-    gray = clahe.apply(gray_denoised)
+# ============================================================
+# Поиск ROI номерного знака (адаптация кода из cv1)
+# ============================================================
 
-    h, w = gray.shape
+def find_best_plate_roi(image: np.ndarray) -> np.ndarray | None:
+    """
+    Находит лучший ROI номерного знака в исходном цветном изображении.
+    Логика взята из репозитория cv1 (пороговый перебор + minAreaRect + solidity).
+    Возвращает цветной ROI (BGR) или None.
+    """
+    filtered_img = cv2.GaussianBlur(image, (9, 9), 0)
+    gray_image = cv2.cvtColor(filtered_img, cv2.COLOR_BGR2GRAY)
 
-    # Захватываем центральную по вертикали полосу, чтобы
-    # отсечь верхнюю/нижнюю рамку номера.
-    y_top = int(0.1 * h)
-    y_bottom = int(0.9 * h)
+    # В оригинальном коде был список [50, 55, ..., 255]
+    threshold_values = list(range(50, 256, 5))
 
-    char_images: List[np.ndarray] = []
-    regions: List[Tuple[int, int, int, int]] = []
+    best_roi = None
+    best_solidity = 0.0
 
-    # Жёстко делим номерной знак по заданным долям ширины
-    for i in range(expected_chars):
-        x_start = int(CHAR_SPLIT_FRACTIONS[i] * w)
-        x_end = int(CHAR_SPLIT_FRACTIONS[i + 1] * w)
-
-        roi_gray = gray[y_top:y_bottom, x_start:x_end]
-
-        # Бинаризация символа с инверсией, чтобы символ был белым
-        _, roi_bw = cv.threshold(
-            roi_gray, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU
+    for thrs in threshold_values:
+        _, binary_image = cv2.threshold(
+            gray_image, thrs, 255, cv2.THRESH_BINARY
         )
 
-        char_images.append(roi_bw)
-        regions.append((x_start, y_top, x_end - x_start, y_bottom - y_top))
+        contours, _ = cv2.findContours(
+            binary_image, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+        )
 
-    # Визуализация самого номерного знака и нарезанных символов
-    # до и после бинаризации (для отладки)
-    try:
-        import matplotlib.pyplot as plt
+        for contour in contours:
+            rect = cv2.minAreaRect(contour)
+            (x, y), (w, h), angle = rect
 
-        # Отдельное окно: номер до и после обработки
-        plt.figure("Номерной знак до/после обработки", figsize=(8, 3))
-        ax_a = plt.subplot(1, 3, 1)
-        ax_a.imshow(gray_orig, cmap="gray")
-        ax_a.set_title("original")
-        ax_a.axis("off")
-        ax_b = plt.subplot(1, 3, 2)
-        ax_b.imshow(gray_denoised, cmap="gray")
-        ax_b.set_title("median")
-        ax_b.axis("off")
-        ax_c = plt.subplot(1, 3, 3)
-        ax_c.imshow(gray, cmap="gray")
-        ax_c.set_title("equalized")
-        ax_c.axis("off")
-        plt.tight_layout()
+            # Отбрасываем странные углы, как в cv1
+            if 15 < angle < 45:
+                continue
 
-        cols = expected_chars
-        rows = 3
-        plt.figure("Нарезанные символы номерного знака", figsize=(2 * cols, 6))
+            if w == 0 or h == 0:
+                continue
 
-        # Первая строка — исходный номерной знак (целиком)
-        ax0 = plt.subplot(rows, cols, 1)
-        ax0.imshow(cv.cvtColor(plate_img, cv.COLOR_BGR2RGB))
-        ax0.set_title("plate")
-        ax0.axis("off")
+            aspect_ratio = w / h if w > h else h / w
+            area = w * h
 
-        for i in range(expected_chars):
-            x_start = int(CHAR_SPLIT_FRACTIONS[i] * w)
-            x_end = int(CHAR_SPLIT_FRACTIONS[i + 1] * w)
-            roi_gray_show = gray[y_top:y_bottom, x_start:x_end]
+            # Фильтр по соотношению сторон и площади (как в cv1, с лёгким запасом)
+            if not (2.5 < aspect_ratio < 5.8 and 1500 < area < 10000):
+                continue
 
-            # Строка 2: исходные (серые, уже обработанные) фрагменты
-            ax1 = plt.subplot(rows, cols, cols + i + 1)
-            ax1.imshow(roi_gray_show, cmap="gray")
-            ax1.set_title(f"{i+1} raw")
-            ax1.axis("off")
+            contour_area = cv2.contourArea(contour)
+            hull = cv2.convexHull(contour)
+            hull_area = cv2.contourArea(hull)
+            solidity = float(contour_area) / hull_area if hull_area > 0 else 0
 
-            # Строка 3: бинаризованные фрагменты
-            ax2 = plt.subplot(rows, cols, 2 * cols + i + 1)
-            ax2.imshow(char_images[i], cmap="gray")
-            ax2.set_title(f"{i+1} bin")
-            ax2.axis("off")
+            # Фильтр по "заполненности" контура
+            if solidity < 0.8:
+                continue
 
-        plt.tight_layout()
-        plt.show()
-    except Exception:
-        # Если matplotlib недоступен, просто не показываем символы
-        pass
+            if solidity > best_solidity:
+                best_solidity = solidity
 
-    return char_images, regions
+                # Коррекция угла, как в cv1
+                angle_corr = angle if angle < 40 else angle - 90
+                M = cv2.getRotationMatrix2D((x, y), angle_corr, 1.0)
+                rotated = cv2.warpAffine(
+                    image,
+                    M,
+                    (image.shape[1], image.shape[0])
+                )
+
+                # Вычисление размеров ROI
+                vertical_value = h if w > h else w
+                horizontal_value = w if w > h else h
+                horizontal_value = min(horizontal_value, 120)
+
+                y1 = int(y - vertical_value / 2)
+                y2 = int(y + vertical_value / 2)
+                x1 = int(x - horizontal_value / 2)
+                x2 = int(x + horizontal_value / 2)
+
+                # Ограничиваем в пределах изображения
+                h_img, w_img = image.shape[:2]
+                y1 = max(y1, 0)
+                y2 = min(y2, h_img)
+                x1 = max(x1, 0)
+                x2 = min(x2, w_img)
+
+                if y2 > y1 and x2 > x1:
+                    best_roi = rotated[y1:y2, x1:x2]
+
+    return best_roi
 
 
-def match_symbol(
-    symbol_img: np.ndarray, templates: Dict[str, np.ndarray]
-) -> Tuple[str, float]:
+# ============================================================
+# Нарезка символов по фиксированным координатам (как в cv1)
+# ============================================================
+
+def split_number_by_image(image: np.ndarray) -> List[np.ndarray]:
     """
-    Сравнение символа с набором шаблонов через cv.matchTemplate.
-    Возвращает лучший символ и его вес (коэффициент корреляции).
+    Вырезание 8 символов из ROI номерного знака.
+    Координаты взяты из split_number_by_image из репозитория cv1.
+    Ожидается, что ROI по размеру близок к тем, для которых
+    подбирались эти координаты.
     """
-    best_char = "?"
+    symbols: List[np.ndarray] = []
+    for (x, y, w, h) in CHAR_BOXES:
+        symbol = image[y:y + h, x:x + w]
+        symbols.append(symbol)
+    return symbols
+
+
+# ============================================================
+# Бинаризация отдельного символа (из cv1)
+# ============================================================
+
+def binaryzation_number_symbol(symbol_image: np.ndarray) -> np.ndarray:
+    """
+    Преобразование символа в двоичное изображение:
+    - в оттенки серого
+    - выравнивание гистограммы
+    - гауссово размытие
+    - адаптивная бинаризация
+    """
+    grayscale = cv2.cvtColor(symbol_image, cv2.COLOR_BGR2GRAY)
+    grayscale = cv2.equalizeHist(grayscale)
+    grayscale = cv2.GaussianBlur(grayscale, (3, 3), 0)
+
+    binary_image = cv2.adaptiveThreshold(
+        grayscale,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        11,
+        2,
+    )
+    return binary_image
+
+
+# ============================================================
+# Сравнение символа с шаблонами (адаптация compare_function)
+# ============================================================
+
+def compare_symbol_with_templates(
+    symbol_image: np.ndarray,
+    templates_folder: Path,
+    is_digit: bool,
+    is_region_digit: bool,
+) -> str:
+    """
+    Сравнение одного символа с набором шаблонов из папки templates_folder.
+    Логика из compare_function в cv1, адаптирована под PR/gosznak.
+    """
+    binary_image = binaryzation_number_symbol(symbol_image)
+
+    # Загружаем имена файлов шаблонов
+    templates = [
+        f
+        for f in os.listdir(templates_folder)
+        if f.lower().endswith((".png", ".jpg", ".jpeg"))
+    ]
+
+    # Отбор по типу символа: цифра / буква
+    if is_digit:
+        templates = [f for f in templates if f[0].isdigit()]
+    else:
+        templates = [f for f in templates if not f[0].isdigit()]
+
+    best_match = "?"
     best_score = -1.0
 
-    # Обеспечим тип и диапазон
-    symbol = symbol_img.astype(np.uint8)
+    for template_name in templates:
+        template_path = templates_folder / template_name
+        template = cv2.imread(str(template_path), cv2.IMREAD_GRAYSCALE)
+        if template is None:
+            continue
 
-    for char, templ in templates.items():
-        # Масштабируем шаблон под размер символа номерного знака
-        resized_templ = cv.resize(templ, (symbol.shape[1], symbol.shape[0]))
+        # Масштабный коэффициент — взят из исходного кода cv1
+        if is_region_digit:
+            scale_factor = 0.04285714285  # цифры региона
+        else:
+            # для цифр номера и букв
+            scale_factor = 0.0488505747126437 if is_digit else 0.0599078341013825
 
-        res = cv.matchTemplate(symbol, resized_templ, cv.TM_CCOEFF_NORMED)
-        _, max_val, _, _ = cv.minMaxLoc(res)
+        new_width = int(template.shape[1] * scale_factor)
+        new_height = int(template.shape[0] * scale_factor)
+        if new_width <= 0 or new_height <= 0:
+            continue
+
+        template_resized = cv2.resize(template, (new_width, new_height))
+
+        # matchTemplate
+        res = cv2.matchTemplate(
+            binary_image, template_resized, cv2.TM_CCOEFF_NORMED
+        )
+        max_val = cv2.minMaxLoc(res)[1]
 
         if max_val > best_score:
             best_score = max_val
-            best_char = char
+            # имя файла без расширения берём как символ
+            best_match = os.path.splitext(template_name)[0]
 
-    return best_char, best_score
+    return best_match
 
 
-def recognize_plate_templates(
-    plate_img: np.ndarray,
-    digits_templates: Dict[str, np.ndarray],
-    letters_templates: Dict[str, np.ndarray],
-) -> Tuple[str, List[Tuple[int, int, int, int]]]:
+# ============================================================
+# Распознавание номера по ROI
+# ============================================================
+
+def recognize_number_from_roi(roi_bgr: np.ndarray) -> str:
     """
-    Распознаёт номерной знак по вырезанному изображению номера,
-    используя сопоставление с шаблонами (matchTemplate).
-
-    Возвращает строку распознанного номера и список координат символов.
+    Полный цикл распознавания номера по вырезанному ROI:
+    - корректировка яркости
+    - нарезка на 8 символов
+    - сравнение с шаблонами ГОСТ
     """
-    chars, regions = segment_characters(plate_img, expected_chars=len(CHAR_PATTERN))
+    roi_bgr = adjust_brightness(roi_bgr)
 
-    result_chars: List[str] = []
+    # Вырезаем символы
+    symbols = split_number_by_image(roi_bgr)
 
-    for idx, (char_img, char_type) in enumerate(zip(chars, CHAR_PATTERN)):
-        if char_type == "digit":
-            char, score = match_symbol(char_img, digits_templates)
-        else:
-            char, score = match_symbol(char_img, letters_templates)
+    recognized_number = ""
 
-        result_chars.append(char)
-
-    # Добавим пробел перед регионом для читабельности
-    if len(result_chars) == 8:
-        plate_text = (
-            "".join(result_chars[:6]) + " " + "".join(result_chars[6:])
+    for i, symbol in enumerate(symbols):
+        is_digit = i in [1, 2, 3, 6, 7]      # 3 цифры номера + 2 цифры региона
+        is_region_digit = i in [6, 7]        # последние 2 — регион
+        ch = compare_symbol_with_templates(
+            symbol,
+            TEMPLATES_DIR,
+            is_digit=is_digit,
+            is_region_digit=is_region_digit,
         )
-    else:
-        plate_text = "".join(result_chars)
+        recognized_number += ch if ch else "?"
 
-    return plate_text, regions
-
-
-def ocr_with_tesseract(plate_img: np.ndarray) -> str | None:
-    """
-    Распознавание номерного знака с помощью Tesseract OCR.
-
-    Выполняет дополнительную обработку:
-      - перевод в оттенки серого,
-      - медианная фильтрация,
-      - CLAHE,
-      - бинаризация,
-      - OCR с ограниченным набором символов.
-    """
-    if not HAS_TESSERACT:
-        return None
-
-    gray = cv.cvtColor(plate_img, cv.COLOR_BGR2GRAY)
-    gray = cv.medianBlur(gray, 5)
-
-    clahe = cv.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
-    gray = clahe.apply(gray)
-
-    # Бинаризация (символы тёмные на светлом фоне)
-    _, bw = cv.threshold(gray, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
-
-    # Конфигурация Tesseract: одна строка текста, только латинские буквы и цифры,
-    # которые используются в российских номерах.
-    whitelist = "ABCEHKMOPTXY0123456789"
-    config = (
-        f"-l eng --oem 3 --psm 7 -c tessedit_char_whitelist={whitelist}"
-    )
-
-    try:
-        text_raw = pytesseract.image_to_string(bw, config=config)
-    except Exception:
-        return None
-
-    # Очищаем от лишних символов и пробелов
-    text = re.sub(r"[^A-Z0-9]", "", text_raw.upper())
-    if not text:
-        return None
-
-    # Пытаемся привести к формату буква-3 цифры-2 буквы-2/3 цифры
-    # Пример: A123BC77
-    pattern = re.compile(r"^[ABCEHKMOPTXY][0-9]{3}[ABCEHKMOPTXY]{2}[0-9]{2,3}$")
-    if pattern.match(text):
-        # Добавим пробел перед регионом, чтобы было читаемо
-        base = text[:6]
-        region = text[6:]
-        return f"{base} {region}"
-
-    return text
+    # Формируем строку вида "А123БВ 77"
+    if len(recognized_number) == 8:
+        return recognized_number[:6] + " " + recognized_number[6:]
+    return recognized_number
 
 
-def recognize_plate(
-    plate_img: np.ndarray,
-    digits_templates: Dict[str, np.ndarray],
-    letters_templates: Dict[str, np.ndarray],
-) -> Tuple[str, List[Tuple[int, int, int, int]]]:
-    """
-    Комбинированное распознавание: Tesseract + шаблоны.
+# ============================================================
+# Обработка одного исходного изображения
+# ============================================================
 
-    Сначала пытаемся распознать номер с помощью Tesseract.
-    Если OCR дал осмысленный результат, используем его как основной,
-    иначе используем вариант по шаблонам.
-    """
-    # Вариант по шаблонам (как в методичке)
-    plate_text_templates, regions = recognize_plate_templates(
-        plate_img, digits_templates, letters_templates
-    )
-
-    plate_text = plate_text_templates
-
-    # Попробуем OCR, если Tesseract доступен
-    if HAS_TESSERACT:
-        ocr_text = ocr_with_tesseract(plate_img)
-        if ocr_text:
-            print(
-                f"OCR (Tesseract): {ocr_text} | "
-                f"templates: {plate_text_templates}"
-            )
-            plate_text = ocr_text
-
-    return plate_text, regions
-
-
-def process_image(
-    image_path: Path,
-    thr: int,
-    digits_templates: Dict[str, np.ndarray],
-    letters_templates: Dict[str, np.ndarray],
-) -> None:
-    """
-    Полная обработка одной картинки:
-      - бинаризация,
-      - поиск контура номера,
-      - вырезание и распознавание,
-      - вывод результата и сохранение картинки с подписью.
-    """
-    img = cv.imread(str(image_path))
+def process_image(image_path: Path) -> None:
+    img = cv2.imread(str(image_path))
     if img is None:
-        print(f"Не удалось загрузить {image_path}")
+        print("Не удалось загрузить:", image_path)
         return
 
-    orig = img.copy()
+    roi = find_best_plate_roi(img)
+    if roi is None:
+        print(f"{image_path.name}: не найден номерной знак.")
+        return
 
-    # Для поиска номера используем бинаризацию с автоматическим порогом (Отсу)
-    # по всему изображению (см. auto_threshold).
-    h_img, w_img = img.shape[:2]
-    bw = auto_threshold(img)
+    plate_text = recognize_number_from_roi(roi)
+    print(f"{image_path.name}: {plate_text}")
 
-    plate_contour = find_plate_contour(bw)
-    plate_img = crop_plate(img, plate_contour)
-    
-    plate_text, char_regions = recognize_plate(plate_img, digits_templates, letters_templates)
+    # Финальная визуализация: исходное + текст + миниатюра ROI
+    out = img.copy()
 
-
-    print(f"{image_path.name}: распознан номер -> {plate_text}")
-
-    # Рисуем найденный контур на исходной картинке
-    x, y, w, h = cv.boundingRect(plate_contour)
-    cv.rectangle(orig, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-    # Добавляем текст номера на исходное изображение
-    h_img, w_img = orig.shape[:2]
-    cv.putText(
-        orig,
+    cv2.putText(
+        out,
         plate_text,
-        (10, h_img - 20),
-        cv.FONT_HERSHEY_SIMPLEX,
-        1.0,
+        (20, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.2,
         (0, 0, 255),
         2,
-        cv.LINE_AA,
+        cv2.LINE_AA,
     )
 
-    # Дополнительно создадим "коллаж": слева исходная, справа вырезанный номер.
-    # При масштабировании сохраняем исходное соотношение сторон номера.
-    ph_orig, pw_orig = plate_img.shape[:2]
-    max_w = w_img // 3
-    max_h = h_img // 3
-    scale = min(max_w / float(pw_orig), max_h / float(ph_orig))
-    new_w = max(1, int(pw_orig * scale))
-    new_h = max(1, int(ph_orig * scale))
-    plate_resized = cv.resize(plate_img, (new_w, new_h))
-    canvas = orig.copy()
-    ph, pw = plate_resized.shape[:2]
-    canvas[10 : 10 + ph, w_img - pw - 10 : w_img - 10] = plate_resized
+    # Вставляем ROI в правый верхний угол
+    ph, pw = roi.shape[:2]
+    scale = 0.7  # чуть уменьшим
+    roi_small = cv2.resize(roi, (int(pw * scale), int(ph * scale)))
+    rh, rw = roi_small.shape[:2]
+    H, W = out.shape[:2]
+
+    y1, y2 = 50, 50 + rh
+    x1, x2 = W - rw - 20, W - 20
+    if y2 <= H and x1 >= 0:
+        out[y1:y2, x1:x2] = roi_small
 
     out_path = RESULTS_DIR / f"result_{image_path.name}"
-    cv.imwrite(str(out_path), canvas)
+    cv2.imwrite(str(out_path), out)
 
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main() -> None:
-    # 1. Собираем список изображений
     images = sorted(IMAGES_DIR.glob("*.jpg"))
     if not images:
-        print(f"Не найдены картинки в {IMAGES_DIR}")
+        print("Нет изображений в", IMAGES_DIR)
         return
 
-    # 2. Глобальный порог по первой картинке 
-   
-
-    # 3. Загружаем шаблоны ГОСТ
-    digits_templates, letters_templates = load_templates(TEMPLATES_DIR)
-    if not digits_templates or not letters_templates:
-        print("Не удалось загрузить шаблоны ГОСТ.")
-        return
-
-    # 4. Обработка всех картинок
     for img_path in images:
-        thr = global_threshold_from_first_image(img_path)
-        process_image(img_path, thr, digits_templates, letters_templates)
+        process_image(img_path)
 
-    print(f"Результаты сохранены в {RESULTS_DIR}")
+    print("Готово. Результаты в", RESULTS_DIR)
 
 
 if __name__ == "__main__":
