@@ -57,20 +57,22 @@ def adjust_brightness(image: np.ndarray) -> np.ndarray:
 # Поиск ROI номерного знака (адаптация кода из cv1)
 # ============================================================
 
-def find_best_plate_roi(image: np.ndarray) -> np.ndarray | None:
+def find_best_plate_roi(image: np.ndarray):
     """
-    Находит лучший ROI номерного знака в исходном цветном изображении.
-    Логика взята из репозитория cv1 (пороговый перебор + minAreaRect + solidity).
-    Возвращает цветной ROI (BGR) или None.
+    Возвращает:
+    - best_roi (BGR)
+    - rect (minAreaRect)
+    - M (матрица поворота для восстановления координат)
     """
     filtered_img = cv2.GaussianBlur(image, (9, 9), 0)
     gray_image = cv2.cvtColor(filtered_img, cv2.COLOR_BGR2GRAY)
 
-    # В оригинальном коде был список [50, 55, ..., 255]
     threshold_values = list(range(50, 256, 5))
 
     best_roi = None
     best_solidity = 0.0
+    best_rect = None
+    best_M = None
 
     for thrs in threshold_values:
         _, binary_image = cv2.threshold(
@@ -85,33 +87,28 @@ def find_best_plate_roi(image: np.ndarray) -> np.ndarray | None:
             rect = cv2.minAreaRect(contour)
             (x, y), (w, h), angle = rect
 
-            # Отбрасываем странные углы, как в cv1
             if 15 < angle < 45:
                 continue
-
             if w == 0 or h == 0:
                 continue
 
             aspect_ratio = w / h if w > h else h / w
             area = w * h
-
-            # Фильтр по соотношению сторон и площади (как в cv1, с лёгким запасом)
             if not (2.5 < aspect_ratio < 5.8 and 1500 < area < 10000):
                 continue
 
             contour_area = cv2.contourArea(contour)
             hull = cv2.convexHull(contour)
             hull_area = cv2.contourArea(hull)
-            solidity = float(contour_area) / hull_area if hull_area > 0 else 0
+            solidity = contour_area / hull_area if hull_area > 0 else 0
 
-            # Фильтр по "заполненности" контура
             if solidity < 0.8:
                 continue
 
             if solidity > best_solidity:
                 best_solidity = solidity
+                best_rect = rect
 
-                # Коррекция угла, как в cv1
                 angle_corr = angle if angle < 40 else angle - 90
                 M = cv2.getRotationMatrix2D((x, y), angle_corr, 1.0)
                 rotated = cv2.warpAffine(
@@ -119,28 +116,28 @@ def find_best_plate_roi(image: np.ndarray) -> np.ndarray | None:
                     M,
                     (image.shape[1], image.shape[0])
                 )
+                best_M = M
 
-                # Вычисление размеров ROI
-                vertical_value = h if w > h else w
-                horizontal_value = w if w > h else h
-                horizontal_value = min(horizontal_value, 120)
+                # ROI вычисляем как раньше
+                vert = h if w > h else w
+                horz = w if w > h else h
+                horz = min(horz, 120)
 
-                y1 = int(y - vertical_value / 2)
-                y2 = int(y + vertical_value / 2)
-                x1 = int(x - horizontal_value / 2)
-                x2 = int(x + horizontal_value / 2)
+                y1 = int(y - vert / 2)
+                y2 = int(y + vert / 2)
+                x1 = int(x - horz / 2)
+                x2 = int(x + horz / 2)
 
-                # Ограничиваем в пределах изображения
-                h_img, w_img = image.shape[:2]
-                y1 = max(y1, 0)
-                y2 = min(y2, h_img)
-                x1 = max(x1, 0)
-                x2 = min(x2, w_img)
+                H, W = image.shape[:2]
+                y1 = max(0, y1)
+                y2 = min(H, y2)
+                x1 = max(0, x1)
+                x2 = min(W, x2)
 
-                if y2 > y1 and x2 > x1:
-                    best_roi = rotated[y1:y2, x1:x2]
+                best_roi = rotated[y1:y2, x1:x2]
 
-    return best_roi
+    return best_roi, best_rect, best_M
+
 
 
 # ============================================================
@@ -299,7 +296,8 @@ def process_image(image_path: Path) -> None:
         print("Не удалось загрузить:", image_path)
         return
 
-    roi = find_best_plate_roi(img)
+    roi, rect, M = find_best_plate_roi(img)
+
     if roi is None:
         print(f"{image_path.name}: не найден номерной знак.")
         return
@@ -307,11 +305,17 @@ def process_image(image_path: Path) -> None:
     plate_text = recognize_number_from_roi(roi)
     print(f"{image_path.name}: {plate_text}")
 
-    # Финальная визуализация: исходное + текст + миниатюра ROI
-    out = img.copy()
+    # ====== Рисуем обводку по minAreaRect ======
+    box = cv2.boxPoints(rect)        # точки прямоугольника
+    box = np.intp(box)               # int
 
+    # Обводим исходный прямоугольник (до поворота)
+    img_box = img.copy()
+    cv2.drawContours(img_box, [box], 0, (0, 255, 0), 3)
+
+    # ====== Добавляем текст ======
     cv2.putText(
-        out,
+        img_box,
         plate_text,
         (20, 40),
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -321,20 +325,18 @@ def process_image(image_path: Path) -> None:
         cv2.LINE_AA,
     )
 
-    # Вставляем ROI в правый верхний угол
+    # ====== Добавляем миниатюру ROI ======
     ph, pw = roi.shape[:2]
-    scale = 0.7  # чуть уменьшим
-    roi_small = cv2.resize(roi, (int(pw * scale), int(ph * scale)))
+    roi_small = cv2.resize(roi, (int(pw * 0.7), int(ph * 0.7)))
     rh, rw = roi_small.shape[:2]
-    H, W = out.shape[:2]
+    H, W = img_box.shape[:2]
 
-    y1, y2 = 50, 50 + rh
-    x1, x2 = W - rw - 20, W - 20
-    if y2 <= H and x1 >= 0:
-        out[y1:y2, x1:x2] = roi_small
+    if rh + 50 < H and rw + 20 < W:
+        img_box[50:50+rh, W-rw-20:W-20] = roi_small
 
     out_path = RESULTS_DIR / f"result_{image_path.name}"
-    cv2.imwrite(str(out_path), out)
+    cv2.imwrite(str(out_path), img_box)
+
 
 
 # ============================================================
