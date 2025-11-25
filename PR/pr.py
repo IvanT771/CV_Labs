@@ -6,17 +6,17 @@ import cv2
 import numpy as np
 
 # ============================================================
-# Пути под твой проект
+# Пути
 # ============================================================
 
-IMAGES_DIR = Path("PR/Images")     # исходные фото машин
-TEMPLATES_DIR = Path("PR/gosznak") # шаблоны ГОСТ (буквы+цифры)
-RESULTS_DIR = Path("PR/Results")   # сюда пишем итоговые картинки
+IMAGES_DIR = Path("PR/Images")
+TEMPLATES_DIR = Path("PR/gosznak")
+RESULTS_DIR = Path("PR/Results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
+
 # ============================================================
-# Формат номера: буква, 3 цифры, 2 буквы, 2 цифры региона
-# Всего 8 символов
+# Формат номера (8 символов)
 # ============================================================
 
 CHAR_PATTERN: List[str] = [
@@ -25,9 +25,7 @@ CHAR_PATTERN: List[str] = [
     "digit", "digit",
 ]
 
-# Координаты сегментации символов внутри ROI номера
-# Эти координаты взяты из кода репозитория cv1 (split_number_by_image),
-# рассчитаны под типичный ROI номерного знака.
+# Координаты нарезки символов из ROI (как в cv1)
 CHAR_BOXES: List[Tuple[int, int, int, int]] = [
     (7, 4, 15, 20),
     (20, 0, 18, 30),
@@ -41,29 +39,20 @@ CHAR_BOXES: List[Tuple[int, int, int, int]] = [
 
 
 # ============================================================
-# Коррекция яркости (из cv1)
+# Коррекция яркости
 # ============================================================
 
 def adjust_brightness(image: np.ndarray) -> np.ndarray:
-    """
-    Выравнивание яркости в YUV, как в репозитории cv1.
-    """
     yuv = cv2.cvtColor(image, cv2.COLOR_BGR2YUV)
     yuv[:, :, 0] = cv2.equalizeHist(yuv[:, :, 0])
     return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
 
 # ============================================================
-# Поиск ROI номерного знака (адаптация кода из cv1)
+# Поиск ROI номерного знака (адаптация cv1)
 # ============================================================
 
 def find_best_plate_roi(image: np.ndarray):
-    """
-    Возвращает:
-    - best_roi (BGR)
-    - rect (minAreaRect)
-    - M (матрица поворота для восстановления координат)
-    """
     filtered_img = cv2.GaussianBlur(image, (9, 9), 0)
     gray_image = cv2.cvtColor(filtered_img, cv2.COLOR_BGR2GRAY)
 
@@ -75,13 +64,8 @@ def find_best_plate_roi(image: np.ndarray):
     best_M = None
 
     for thrs in threshold_values:
-        _, binary_image = cv2.threshold(
-            gray_image, thrs, 255, cv2.THRESH_BINARY
-        )
-
-        contours, _ = cv2.findContours(
-            binary_image, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
-        )
+        _, binary = cv2.threshold(gray_image, thrs, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
         for contour in contours:
             rect = cv2.minAreaRect(contour)
@@ -111,14 +95,9 @@ def find_best_plate_roi(image: np.ndarray):
 
                 angle_corr = angle if angle < 40 else angle - 90
                 M = cv2.getRotationMatrix2D((x, y), angle_corr, 1.0)
-                rotated = cv2.warpAffine(
-                    image,
-                    M,
-                    (image.shape[1], image.shape[0])
-                )
+                rotated = cv2.warpAffine(image, M, (image.shape[1], image.shape[0]))
                 best_M = M
 
-                # ROI вычисляем как раньше
                 vert = h if w > h else w
                 horz = w if w > h else h
                 horz = min(horz, 120)
@@ -129,47 +108,40 @@ def find_best_plate_roi(image: np.ndarray):
                 x2 = int(x + horz / 2)
 
                 H, W = image.shape[:2]
-                y1 = max(0, y1)
-                y2 = min(H, y2)
-                x1 = max(0, x1)
-                x2 = min(W, x2)
+                y1, y2 = max(0, y1), min(H, y2)
+                x1, x2 = max(0, x1), min(W, x2)
 
                 best_roi = rotated[y1:y2, x1:x2]
 
     return best_roi, best_rect, best_M
 
 
-
 # ============================================================
-# Нарезка символов по фиксированным координатам (как в cv1)
+# Нарезка ROI на символы
 # ============================================================
 
 def split_number_by_image(image: np.ndarray) -> List[np.ndarray]:
-    """
-    Вырезание 8 символов из ROI номерного знака.
-    Координаты взяты из split_number_by_image из репозитория cv1.
-    Ожидается, что ROI по размеру близок к тем, для которых
-    подбирались эти координаты.
-    """
     symbols: List[np.ndarray] = []
+    H, W = image.shape[:2]
+
     for (x, y, w, h) in CHAR_BOXES:
+        # защита от выхода за границы ROI
+        x = max(0, min(x, W - 1))
+        y = max(0, min(y, H - 1))
+        w = max(1, min(w, W - x))
+        h = max(1, min(h, H - y))
+
         symbol = image[y:y + h, x:x + w]
         symbols.append(symbol)
+
     return symbols
 
 
 # ============================================================
-# Бинаризация отдельного символа (из cv1)
+# Бинаризация символа
 # ============================================================
 
 def binaryzation_number_symbol(symbol_image: np.ndarray) -> np.ndarray:
-    """
-    Преобразование символа в двоичное изображение:
-    - в оттенки серого
-    - выравнивание гистограммы
-    - гауссово размытие
-    - адаптивная бинаризация
-    """
     grayscale = cv2.cvtColor(symbol_image, cv2.COLOR_BGR2GRAY)
     grayscale = cv2.equalizeHist(grayscale)
     grayscale = cv2.GaussianBlur(grayscale, (3, 3), 0)
@@ -186,111 +158,200 @@ def binaryzation_number_symbol(symbol_image: np.ndarray) -> np.ndarray:
 
 
 # ============================================================
-# Сравнение символа с шаблонами (адаптация compare_function)
+# Сравнение с шаблонами
 # ============================================================
 
-def compare_symbol_with_templates(
-    symbol_image: np.ndarray,
-    templates_folder: Path,
-    is_digit: bool,
-    is_region_digit: bool,
-) -> str:
+def compare_symbol_with_templates(symbol_bgr: np.ndarray,
+                                  templates_folder: Path,
+                                  is_digit: bool,
+                                  is_region_digit: bool):
     """
-    Сравнение одного символа с набором шаблонов из папки templates_folder.
-    Логика из compare_function в cv1, адаптирована под PR/gosznak.
+    Возвращает:
+      best_match: символ (строка)
+      binary_symbol: бинаризованный символ (np.ndarray)
+      best_template_img: изображение шаблона (np.ndarray)
     """
-    binary_image = binaryzation_number_symbol(symbol_image)
+    if symbol_bgr is None or symbol_bgr.size == 0:
+        return "?", None, None
 
-    # Загружаем имена файлов шаблонов
-    templates = [
-        f
-        for f in os.listdir(templates_folder)
-        if f.lower().endswith((".png", ".jpg", ".jpeg"))
+    binary_symbol = binaryzation_number_symbol(symbol_bgr)
+    sh, sw = binary_symbol.shape[:2]
+
+    template_files = [
+        f for f in os.listdir(templates_folder)
+        if f.lower().endswith((".png", ".jpg"))
     ]
 
-    # Отбор по типу символа: цифра / буква
     if is_digit:
-        templates = [f for f in templates if f[0].isdigit()]
+        template_files = [f for f in template_files if f[0].isdigit()]
     else:
-        templates = [f for f in templates if not f[0].isdigit()]
+        template_files = [f for f in template_files if not f[0].isdigit()]
 
     best_match = "?"
     best_score = -1.0
+    best_template_img = None
 
-    for template_name in templates:
-        template_path = templates_folder / template_name
-        template = cv2.imread(str(template_path), cv2.IMREAD_GRAYSCALE)
-        if template is None:
+    for tmpl_file in template_files:
+        tmpl_img = cv2.imread(str(templates_folder / tmpl_file), cv2.IMREAD_GRAYSCALE)
+        if tmpl_img is None:
             continue
 
-        # Масштабный коэффициент — взят из исходного кода cv1
         if is_region_digit:
-            scale_factor = 0.04285714285  # цифры региона
+            scale = 0.04285714285
         else:
-            # для цифр номера и букв
-            scale_factor = 0.0488505747126437 if is_digit else 0.0599078341013825
+            scale = 0.0488505 if is_digit else 0.0599078
 
-        new_width = int(template.shape[1] * scale_factor)
-        new_height = int(template.shape[0] * scale_factor)
-        if new_width <= 0 or new_height <= 0:
+        new_w = max(1, int(tmpl_img.shape[1] * scale))
+        new_h = max(1, int(tmpl_img.shape[0] * scale))
+
+        if new_h > sh or new_w > sw:
+            ratio = min(sh / new_h, sw / new_w)
+            new_w = max(1, int(new_w * ratio))
+            new_h = max(1, int(new_h * ratio))
+
+        if new_h < 1 or new_w < 1:
             continue
 
-        template_resized = cv2.resize(template, (new_width, new_height))
+        tmpl_resized = cv2.resize(tmpl_img, (new_w, new_h))
 
-        # matchTemplate
-        res = cv2.matchTemplate(
-            binary_image, template_resized, cv2.TM_CCOEFF_NORMED
-        )
-        max_val = cv2.minMaxLoc(res)[1]
+        res = cv2.matchTemplate(binary_symbol, tmpl_resized, cv2.TM_CCOEFF_NORMED)
+        score = cv2.minMaxLoc(res)[1]
 
-        if max_val > best_score:
-            best_score = max_val
-            # имя файла без расширения берём как символ
-            best_match = os.path.splitext(template_name)[0]
+        if score > best_score:
+            best_score = score
+            best_match = os.path.splitext(tmpl_file)[0]
+            best_template_img = tmpl_resized
 
-    return best_match
+    return best_match, binary_symbol, best_template_img
 
 
 # ============================================================
-# Распознавание номера по ROI
+# Построение миниатюры символа: 150×150, 3 блока
 # ============================================================
 
-def recognize_number_from_roi(roi_bgr: np.ndarray) -> str:
+def make_symbol_tile(symbol_bgr: np.ndarray,
+                     binary_symbol: np.ndarray | None,
+                     template_img: np.ndarray | None,
+                     tile_h: int = 150,
+                     tile_w: int = 150) -> np.ndarray:
+
+    def blank_block():
+        return np.zeros((tile_h, tile_w // 3, 3), dtype=np.uint8)
+
+    def place_into_block(img, block):
+        h, w = img.shape[:2]
+        if h == 0 or w == 0:
+            return block
+
+        # масштабируем по высоте
+        scale = tile_h / float(h)
+        new_w = max(1, int(w * scale))
+        resized = cv2.resize(img, (new_w, tile_h), interpolation=cv2.INTER_NEAREST)
+
+        # если шире блока — уменьшаем до ширины блока
+        max_w = block.shape[1]
+        if resized.shape[1] > max_w:
+            resized = cv2.resize(resized, (max_w, tile_h), interpolation=cv2.INTER_AREA)
+            new_w = max_w
+
+        # центрирование по ширине
+        x0 = (max_w - new_w) // 2
+        block[:, x0:x0 + new_w] = resized
+        return block
+
+    # original
+    if symbol_bgr is None or symbol_bgr.size == 0:
+        orig = blank_block()
+    else:
+        orig = place_into_block(symbol_bgr, blank_block())
+
+    # binary
+    if binary_symbol is None or binary_symbol.size == 0:
+        bin_block = blank_block()
+    else:
+        b3 = cv2.cvtColor(binary_symbol, cv2.COLOR_GRAY2BGR)
+        bin_block = place_into_block(b3, blank_block())
+
+    # template
+    if template_img is None or template_img.size == 0:
+        tmpl_block = blank_block()
+    else:
+        t3 = cv2.cvtColor(template_img, cv2.COLOR_GRAY2BGR)
+        tmpl_block = place_into_block(t3, blank_block())
+
+    # склейка трёх частей
+    tile = np.hstack([orig, bin_block, tmpl_block])
+    return tile
+
+
+
+def build_symbols_collage(tiles: List[np.ndarray],
+                          tile_h: int = 150,
+                          tile_w: int = 150,
+                          cols: int = 4,
+                          rows: int = 2) -> np.ndarray:
     """
-    Полный цикл распознавания номера по вырезанному ROI:
-    - корректировка яркости
-    - нарезка на 8 символов
-    - сравнение с шаблонами ГОСТ
+    Строит коллаж 4×2 из 8 миниатюр.
+    """
+    total = cols * rows
+    # дополнить до нужного количества пустыми
+    while len(tiles) < total:
+        tiles.append(np.zeros((tile_h, tile_w, 3), dtype=np.uint8))
+
+    collage_h = rows * tile_h
+    collage_w = cols * tile_w
+    collage = np.zeros((collage_h, collage_w, 3), dtype=np.uint8)
+
+    for idx in range(total):
+        r = idx // cols
+        c = idx % cols
+        y1 = r * tile_h
+        x1 = c * tile_w
+        collage[y1:y1 + tile_h, x1:x1 + tile_w] = tiles[idx]
+
+    return collage
+
+
+# ============================================================
+# Распознавание номера
+# ============================================================
+
+def recognize_number_from_roi(roi_bgr: np.ndarray):
+    """
+    Возвращает:
+      text: распознанный номер
+      tiles_data: список (symbol_bgr, binary_symbol, template_img) для 8 символов
     """
     roi_bgr = adjust_brightness(roi_bgr)
-
-    # Вырезаем символы
     symbols = split_number_by_image(roi_bgr)
 
-    recognized_number = ""
+    recognized = ""
+    tiles_data: List[Tuple[np.ndarray, np.ndarray | None, np.ndarray | None]] = []
 
     for i, symbol in enumerate(symbols):
-        is_digit = i in [1, 2, 3, 6, 7]      # 3 цифры номера + 2 цифры региона
-        is_region_digit = i in [6, 7]        # последние 2 — регион
-        ch = compare_symbol_with_templates(
-            symbol,
-            TEMPLATES_DIR,
-            is_digit=is_digit,
-            is_region_digit=is_region_digit,
+        is_digit = i in [1, 2, 3, 6, 7]
+        is_region_digit = i in [6, 7]
+
+        best_char, bin_sym, tmpl_img = compare_symbol_with_templates(
+            symbol, TEMPLATES_DIR, is_digit, is_region_digit
         )
-        recognized_number += ch if ch else "?"
 
-    # Формируем строку вида "А123БВ 77"
-    if len(recognized_number) == 8:
-        return recognized_number[:6] + " " + recognized_number[6:]
-    return recognized_number
+        recognized += best_char if best_char else "?"
+        tiles_data.append((symbol, bin_sym, tmpl_img))
+
+    if len(recognized) == 8:
+        text = recognized[:6] + " " + recognized[6:]
+    else:
+        text = recognized
+
+    return text, tiles_data
 
 
 # ============================================================
-# Обработка одного исходного изображения
+# Обработка изображения целиком
 # ============================================================
 
-def process_image(image_path: Path) -> None:
+def process_image(image_path: Path):
     img = cv2.imread(str(image_path))
     if img is None:
         print("Не удалось загрузить:", image_path)
@@ -298,61 +359,86 @@ def process_image(image_path: Path) -> None:
 
     roi, rect, M = find_best_plate_roi(img)
 
-    if roi is None:
-        print(f"{image_path.name}: не найден номерной знак.")
+    if roi is None or rect is None:
+        print(f"{image_path.name}: номер не найден")
         return
 
-    plate_text = recognize_number_from_roi(roi)
-    print(f"{image_path.name}: {plate_text}")
+    number_text, tiles_data = recognize_number_from_roi(roi)
+    print(f"{image_path.name}: {number_text}")
 
-    # ====== Рисуем обводку по minAreaRect ======
-    box = cv2.boxPoints(rect)        # точки прямоугольника
-    box = np.intp(box)               # int
+    # --- рисуем рамку вокруг номера ---
+    box = cv2.boxPoints(rect)
+    box = np.intp(box)
+    boxed = img.copy()
+    cv2.drawContours(boxed, [box], 0, (0, 255, 0), 3)
 
-    # Обводим исходный прямоугольник (до поворота)
-    img_box = img.copy()
-    cv2.drawContours(img_box, [box], 0, (0, 255, 0), 3)
-
-    # ====== Добавляем текст ======
+    # --- текст ---
     cv2.putText(
-        img_box,
-        plate_text,
+        boxed,
+        number_text,
         (20, 40),
         cv2.FONT_HERSHEY_SIMPLEX,
-        1.2,
+        1.3,
         (0, 0, 255),
-        2,
-        cv2.LINE_AA,
+        3,
     )
 
-    # ====== Добавляем миниатюру ROI ======
-    ph, pw = roi.shape[:2]
-    roi_small = cv2.resize(roi, (int(pw * 0.7), int(ph * 0.7)))
+    # --- миниатюра ROI в углу ---
+    roi_small = cv2.resize(
+        roi,
+        (int(roi.shape[1] * 0.7), int(roi.shape[0] * 0.7)),
+        interpolation=cv2.INTER_AREA,
+    )
+    H0, W0 = boxed.shape[:2]
     rh, rw = roi_small.shape[:2]
-    H, W = img_box.shape[:2]
+    if rh + 50 < H0 and rw + 20 < W0:
+        boxed[50:50 + rh, W0 - rw - 20:W0 - 20] = roi_small
 
-    if rh + 50 < H and rw + 20 < W:
-        img_box[50:50+rh, W-rw-20:W-20] = roi_small
+    # --- строим миниатюры для всех символов ---
+    tiles: List[np.ndarray] = []
+    for symbol_bgr, bin_sym, tmpl_img in tiles_data:
+        tile = make_symbol_tile(symbol_bgr, bin_sym, tmpl_img,
+                                tile_h=150, tile_w=150)
+        tiles.append(tile)
+
+    collage = build_symbols_collage(tiles, tile_h=150, tile_w=150,
+                                    cols=4, rows=2)
+
+    # --- склейка: оригинал сверху, коллаж снизу ---
+    h0, w0 = boxed.shape[:2]
+    h1, w1 = collage.shape[:2]
+
+    H = h0 + 20 + h1
+    W = max(w0, w1)
+    canvas = np.zeros((H, W, 3), dtype=np.uint8)
+
+    # исходное изображение по центру сверху
+    x0 = (W - w0) // 2
+    canvas[0:h0, x0:x0 + w0] = boxed
+
+    # коллаж по центру снизу
+    x1 = (W - w1) // 2
+    y1 = h0 + 20
+    canvas[y1:y1 + h1, x1:x1 + w1] = collage
 
     out_path = RESULTS_DIR / f"result_{image_path.name}"
-    cv2.imwrite(str(out_path), img_box)
-
+    cv2.imwrite(str(out_path), canvas)
 
 
 # ============================================================
 # MAIN
 # ============================================================
 
-def main() -> None:
+def main():
     images = sorted(IMAGES_DIR.glob("*.jpg"))
     if not images:
-        print("Нет изображений в", IMAGES_DIR)
+        print("Нет изображений в PR/Images")
         return
 
-    for img_path in images:
-        process_image(img_path)
+    for path in images:
+        process_image(path)
 
-    print("Готово. Результаты в", RESULTS_DIR)
+    print("Готово. Результаты в PR/Results")
 
 
 if __name__ == "__main__":
