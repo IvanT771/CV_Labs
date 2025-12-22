@@ -34,8 +34,8 @@ vertical = cv.dilate(vertical, verticalStructure)
 mask = horizontal + vertical
 
 # === 4. Отображаем результаты ===
-cv.imshow("Original", src)
-cv.imshow("Binary", src_bin)
+#cv.imshow("Original", src)
+#cv.imshow("Binary", src_bin)
 cv.imshow("Horizontal", horizontal)
 cv.imshow("Vertical", vertical)
 cv.imshow("Combined", mask)

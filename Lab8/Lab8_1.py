@@ -42,8 +42,8 @@ mask[center_row_start:center_row_end, center_col_start:center_col_end] = 255
 
 masked_img = cv.bitwise_and(img, img, mask=mask)
 
-cv.imshow("Маска", mask)
-cv.imshow("Изображение с маской", masked_img)
+#cv.imshow("Маска", mask)
+#cv.imshow("Изображение с маской", masked_img)
 
 hist_mask = cv.calcHist([img], [0], mask, [256], [0, 256])
 

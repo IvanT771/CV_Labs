@@ -28,6 +28,6 @@ print("Распознанный текст:\n", text)
 
 # === 6. Отображаем изображение ===
 cv.imshow("Original", img)
-cv.imshow("Processed", gray)
+#cv.imshow("Processed", gray)
 cv.waitKey(0)
 cv.destroyAllWindows()
