@@ -113,7 +113,7 @@ net = Net().to(device)
 # === 4. Функция потерь и оптимизатор ===
 
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(net.parameters(), lr=0.001)
+optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
 
 
 # === 5. Обучение сети ===
@@ -192,7 +192,7 @@ def show_predictions(num_images: int = 4) -> None:
 
 
 def main() -> None:
-    train(num_epochs=10)
+    train(num_epochs=3)
     evaluate()
     show_predictions(num_images=4)
     torch.save(net.state_dict(), "cifar10_cnn.pth")
