@@ -7,6 +7,9 @@ https://docs.pytorch.org/tutorials/beginner/blitz/cifar10_tutorial.html
 
 import sys
 
+import numpy as np
+from matplotlib import pyplot as plt
+
 # === 1. Импорт PyTorch и torchvision с проверкой наличия ===
 try:
     import torch
@@ -28,7 +31,15 @@ print("Используется устройство:", device)
 # === 2. Подготовка данных CIFAR‑10 ===
 
 # Нормализация как в официальном примере:
-transform = transforms.Compose(
+train_transform = transforms.Compose(
+    [
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ]
+)
+test_transform = transforms.Compose(
     [
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
@@ -39,7 +50,7 @@ trainset = torchvision.datasets.CIFAR10(
     root="./data_cifar10",
     train=True,
     download=True,
-    transform=transform,
+    transform=train_transform,
 )
 trainloader = torch.utils.data.DataLoader(
     trainset,
@@ -51,7 +62,7 @@ testset = torchvision.datasets.CIFAR10(
     root="./data_cifar10",
     train=False,
     download=True,
-    transform=transform,
+    transform=test_transform,
 )
 testloader = torch.utils.data.DataLoader(
     testset,
@@ -102,7 +113,7 @@ net = Net().to(device)
 # === 4. Функция потерь и оптимизатор ===
 
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
+optimizer = optim.Adam(net.parameters(), lr=0.001)
 
 
 # === 5. Обучение сети ===
@@ -149,13 +160,44 @@ def evaluate() -> None:
     print(f"Точность сети на 10000 тестовых изображениях: {100 * correct / total:.2f}%")
 
 
+def imshow(img: torch.Tensor) -> None:
+    img = img * 0.5 + 0.5
+    npimg = img.cpu().numpy()
+    plt.imshow(np.transpose(npimg, (1, 2, 0)))
+
+
+def show_predictions(num_images: int = 4) -> None:
+    dataiter = iter(testloader)
+    images, labels = next(dataiter)
+
+    num_images = min(num_images, images.size(0))
+    images = images[:num_images]
+    labels = labels[:num_images]
+
+    net.eval()
+    with torch.no_grad():
+        outputs = net(images.to(device))
+        _, predicted = torch.max(outputs, 1)
+
+    plt.figure("Распознавание CIFAR-10")
+    for i in range(num_images):
+        plt.subplot(1, num_images, i + 1)
+        imshow(images[i])
+        gt = classes[labels[i].item()]
+        pred = classes[predicted[i].item()]
+        plt.title(f"GT: {gt}\nPred: {pred}")
+        plt.xticks([]), plt.yticks([])
+    plt.tight_layout()
+    plt.show()
+
+
 def main() -> None:
-    train(num_epochs=2)
+    train(num_epochs=10)
     evaluate()
+    show_predictions(num_images=4)
     torch.save(net.state_dict(), "cifar10_cnn.pth")
     print("Модель сохранена в файл cifar10_cnn.pth")
 
 
 if __name__ == "__main__":
     main()
-
